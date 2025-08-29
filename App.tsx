@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useCallback, useReducer, useEffect } from 'react';
-import type { Team, Match, Standing, PlayoffBracket, PlayoffMatch, Tournament } from './types';
+import type { Team, Match, Standing, PlayoffBracket, PlayoffMatch, Tournament, Action } from './types';
 import { View } from './types';
 import TeamManagement from './components/TeamManagement';
 import ScheduleConfig from './components/ScheduleConfig';
@@ -10,8 +10,8 @@ import PlayoffView from './components/PlayoffView';
 import { generateSchedule } from './services/scheduleService';
 import { generatePlayoffBracket } from './services/playoffService';
 import TournamentList from './components/TournamentList';
-import { saveTournamentsToLocalStorage, loadTournamentsFromLocalStorage } from './services/storageService';
-
+import { supabase } from './lib/supabaseClient';
+import Auth from './components/authentication';
 const Header: React.FC<{ 
     currentView: View; 
     setView: (view: View) => void;
@@ -70,12 +70,11 @@ type TournamentAction =
   | { type: 'DELETE_TOURNAMENT'; payload: { id: string } }
   | { type: 'UPDATE_TOURNAMENT'; payload: { id: string; updateFn: (tournament: Tournament) => void } };
 
-const tournamentsReducer = (state: Tournament[], action: TournamentAction): Tournament[] => {
-  switch (action.type) {
-    case 'SET_TOURNAMENTS': {
-        return action.payload;
-    }
-    case 'CREATE_TOURNAMENT': {
+  const tournamentsReducer = (state: Tournament[], action: TournamentAction): Tournament[] => {
+    switch (action.type) {
+        case 'SET_TOURNAMENTS':
+            return action.payload;
+        case 'CREATE_TOURNAMENT': {
       const { name, setsToWin } = action.payload;
       const newTournament: Tournament = {
         id: Date.now().toString(),
@@ -109,17 +108,63 @@ const tournamentsReducer = (state: Tournament[], action: TournamentAction): Tour
 
 const App: React.FC = () => {
     const [view, setView] = useState<View>(View.Teams);
-    const [tournaments, dispatch] = useReducer(tournamentsReducer, [], loadTournamentsFromLocalStorage);
+    const [tournaments, dispatch] = useReducer(tournamentsReducer, []);
     const [activeTournamentId, setActiveTournamentId] = useState<string | null>(null);
+    const [session, setSession] = useState<any>(null);
+    const [loading, setLoading] = useState(true);
     
-    // Save to localStorage whenever the tournaments state changes
     useEffect(() => {
-        saveTournamentsToLocalStorage(tournaments);
-    }, [tournaments]);
+        supabase.auth.getSession().then(({ data: { session } }) => {
+          setSession(session)
+          setLoading(false);
+        })
+    
+        const {
+          data: { subscription },
+        } = supabase.auth.onAuthStateChange((_event, session) => {
+          setSession(session)
+        })
+    
+        return () => subscription.unsubscribe()
+    }, [])
 
-    const activeTournament = useMemo(() => {
-        return tournaments.find(t => t.id === activeTournamentId) || null;
-    }, [tournaments, activeTournamentId]);
+    useEffect(() => {
+        const fetchTournaments = async () => {
+            if (session) {
+                setLoading(true);
+                const { data, error } = await supabase
+                    .from('tournaments')
+                    .select(`
+                        *,
+                        teams (*),
+                        matches (*),
+                        playoff_matches (*)
+                    `);
+
+                if (error) {
+                    console.error('Error fetching tournaments:', error);
+                } else if (data) {
+                    const formattedData = data.map(t => ({
+                        ...t,
+                        id: String(t.id),
+                        playoffMatches: t.playoff_matches.map(pm => ({ ...pm, id: String(pm.id) })),
+                        matches: t.matches.map(m => ({ ...m, id: String(m.id) })),
+                        teams: t.teams.map(team => ({ ...team, id: String(team.id) })),
+                    }));
+                    dispatch({ type: 'SET_TOURNAMENTS', payload: formattedData });
+
+                    // *** ADD THIS LOGIC ***
+                    // If there's no active tournament selected, select the first one from the list.
+                    if (!activeTournamentId && formattedData.length > 0) {
+                        setActiveTournamentId(formattedData[0].id);
+                    }
+                }
+                setLoading(false);
+            }
+        };
+        fetchTournaments();
+    // Add activeTournamentId to the dependency array
+    }, [session, activeTournamentId]);
 
     const handleCreateTournament = (name: string, setsToWin: number) => {
         const newTournamentId = Date.now().toString(); // Pre-generate ID
@@ -283,13 +328,13 @@ const App: React.FC = () => {
     };
 
     const standings = useMemo<Standing[]>(() => {
-        if (!activeTournament) return [];
-        const stats: { [key: string]: Standing } = activeTournament.teams.reduce((acc, team) => {
+        if (!activeTournamentId) return [];
+        const stats: { [key: string]: Standing } = activeTournamentId.teams.reduce((acc, team) => {
             acc[team.id] = { team, wins: 0, losses: 0, setsWon: 0, setsLost: 0, pointsFor: 0, pointsAgainst: 0 };
             return acc;
         }, {} as { [key: string]: Standing });
 
-        activeTournament.schedule.forEach(match => {
+        activeTournamentId.schedule.forEach(match => {
             if (!match.winnerId) return;
             const loserId = match.winnerId === match.team1.id ? match.team2.id : match.team1.id;
             if (stats[match.winnerId]) stats[match.winnerId].wins++;
@@ -320,12 +365,12 @@ const App: React.FC = () => {
             const bPointDiff = b.pointsFor - b.pointsAgainst;
             return bPointDiff - aPointDiff;
         });
-    }, [activeTournament]);
+    }, [activeTournamentId]);
 
     const handleGeneratePlayoffs = (numTeams: number, setsToWin: number, firstRoundPairings: { team1: Team, team2: Team }[], byeTeamIds: Set<string>) => {
-        if (!standings || !activeTournament) return;
+        if (!standings || !activeTournamentId) return;
         
-        const teamsWithByes = activeTournament.teams.filter(t => byeTeamIds.has(t.id));
+        const teamsWithByes = activeTournamentId.teams.filter(t => byeTeamIds.has(t.id));
         const bracket = generatePlayoffBracket(standings, numTeams, setsToWin, firstRoundPairings, teamsWithByes);
         
         updateActiveTournament(t => {
@@ -343,8 +388,15 @@ const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tournaments]);
 
+    if (loading) {
+        return <div className="flex items-center justify-center h-screen"><div className="text-xl">Loading...</div></div>;
+    }
 
-    if (!activeTournament) {
+    if (!session) {
+        return <Auth />;
+    }
+
+    if (!activeTournamentId) {
         return <TournamentList 
             tournaments={tournaments}
             onCreate={handleCreateTournament}
@@ -355,25 +407,25 @@ const App: React.FC = () => {
 
     return (
         <div className="min-h-screen bg-slate-900">
-            <Header currentView={view} setView={setView} tournamentName={activeTournament.name} onBackToList={handleBackToList} />
+            <Header currentView={view} setView={setView} tournamentName={activeTournamentId.name} onBackToList={handleBackToList} />
             <main className="container mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 {view === View.Teams && (
-                    <TeamManagement teams={activeTournament.teams} onAdd={handleAddTeam} onUpdate={handleUpdateTeam} onDelete={handleDeleteTeam} />
+                    <TeamManagement teams={activeTournamentId.teams} onAdd={handleAddTeam} onUpdate={handleUpdateTeam} onDelete={handleDeleteTeam} />
                 )}
                 {view === View.Schedule && (
                      <>
                         <ScheduleConfig
-                            allTeams={activeTournament.teams}
-                            schedule={activeTournament.schedule}
+                            allTeams={activeTournamentId.teams}
+                            schedule={activeTournamentId.schedule}
                             onGenerateDay={handleGenerateDaySchedule}
                         />
                         <ScheduleView 
-                            schedule={activeTournament.schedule} 
+                            schedule={activeTournamentId.schedule} 
                             onUpdateScore={handleUpdateMatchScore} 
-                            setsToWin={activeTournament.setsToWin}
+                            setsToWin={activeTournamentId.setsToWin}
                             onClearDay={handleClearDaySchedule}
                             onRegenerateDay={handleRegenerateDaySchedule}
-                            allTeams={activeTournament.teams}
+                            allTeams={activeTournamentId.teams}
                             onDeleteMatch={handleDeleteMatch}
                         />
                     </>
@@ -381,10 +433,10 @@ const App: React.FC = () => {
                 {view === View.Standings && <StandingsView standings={standings} />}
                 {view === View.Playoffs && <PlayoffView 
                     standings={standings} 
-                    bracket={activeTournament.playoffBracket} 
+                    bracket={activeTournamentId.playoffBracket} 
                     onGenerate={handleGeneratePlayoffs} 
                     onUpdateScore={handleUpdateMatchScore} 
-                    setsToWin={activeTournament.playoffBracket?.setsToWin ?? activeTournament.setsToWin} 
+                    setsToWin={activeTournamentId.playoffBracket?.setsToWin ?? activeTournamentId.setsToWin} 
                 />}
             </main>
         </div>

@@ -58,6 +58,15 @@ export interface Tournament {
   setsToWin: number;
 }
 
+export type Action =
+  | { type: 'SET_TOURNAMENTS'; payload: Tournament[] }
+  | { type: 'ADD_TOURNAMENT'; payload: Tournament }
+  | { type: 'DELETE_TOURNAMENT'; payload: string } // Use string for ID
+  | { type: 'ADD_TEAM'; payload: { tournamentId: string; team: Team } }
+  | { type: 'UPDATE_TEAM'; payload: { tournamentId: string; team: Team } }
+  | { type: 'DELETE_TEAM'; payload: { tournamentId: string; teamId: string } }
+
+
 export enum View {
   Teams = 'TEAMS',
   Schedule = 'SCHEDULE',

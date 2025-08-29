@@ -1,36 +1,87 @@
 import React, { useState } from 'react';
-import type { Tournament } from '../types';
+import type { Action, Tournament } from '../types';
 import Modal from './Modal';
 import { PlusIcon, TrashIcon } from './icons';
+import { supabase } from '../lib/supabaseClient';
 
-interface TournamentListProps {
-  tournaments: Tournament[];
-  onCreate: (name: string, setsToWin: number) => void;
-  onSelect: (id: string) => void;
-  onDelete: (id: string) => void;
-}
+type TournamentAction =
+  | { type: 'ADD_TOURNAMENT'; payload: Tournament }
+  | { type: 'DELETE_TOURNAMENT'; payload: string };
 
-const TournamentList: React.FC<TournamentListProps> = ({ tournaments, onCreate, onSelect, onDelete }) => {
+  interface TournamentListProps {
+    tournaments: Tournament[];
+    onSelect: (id: string) => void;
+    dispatch: React.Dispatch<TournamentAction>;
+  }
+
+const TournamentList: React.FC<TournamentListProps> = ({ tournaments, onSelect, dispatch }) => {
   const [isCreating, setIsCreating] = useState(false);
-  const [newTournamentName, setNewTournamentName] = useState('');
   const [deletingTournament, setDeletingTournament] = useState<Tournament | null>(null);
-  const [setsToWin, setSetsToWin] = useState(2);
-
-  const handleCreate = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (newTournamentName.trim()) {
-      onCreate(newTournamentName.trim(), setsToWin);
-      setNewTournamentName('');
-      setSetsToWin(2);
-      setIsCreating(false);
-    }
-  };
   
-  const handleDeleteConfirm = () => {
-      if (deletingTournament) {
-          onDelete(deletingTournament.id);
-          setDeletingTournament(null);
+  const [newTournamentName, setNewTournamentName] = useState('');
+  const [setsToWin, setSetsToWin] = useState(2); // Default to "Best of 3"
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newTournamentName.trim() === '') return;
+
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+        alert("You must be logged in to add a tournament.");
+        return;
+    }
+
+    // Insert the new tournament into the database
+    const { data, error } = await supabase
+        .from('tournaments')
+        .insert({ 
+            name: newTournamentName.trim(), 
+            user_id: user.id,
+            sets_to_win: setsToWin 
+        })
+        .select()
+        .single();
+
+        if (error) {
+          console.error('Error creating tournament:', error);
+          alert('Failed to create tournament.');
+      } else if (data) {
+          // The ID from Supabase is a number, but our app uses strings.
+          const newTournament = { 
+              ...data, 
+              id: String(data.id), // Convert ID to string
+              teams: [], 
+              matches: [], 
+              playoffMatches: [] 
+          };
+          dispatch({ type: 'ADD_TOURNAMENT', payload: newTournament });
+          
+          // Reset form and close modal
+          setNewTournamentName('');
+          setSetsToWin(2);
+          setIsCreating(false);
+  
+          // *** ADD THIS LINE ***
+          // Automatically select the new tournament
+          onSelect(newTournament.id);
       }
+    };
+
+  const handleDeleteConfirm = async () => {
+    if (!deletingTournament) return;
+
+    const { error } = await supabase
+        .from('tournaments')
+        .delete()
+        .eq('id', deletingTournament.id);
+
+    if (error) {
+        console.error('Error deleting tournament:', error);
+        alert('Failed to delete tournament.');
+    } else {
+        dispatch({ type: 'DELETE_TOURNAMENT', payload: deletingTournament.id });
+    }
+    setDeletingTournament(null);
   };
 
   return (
