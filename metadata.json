@@ -1,0 +1,5 @@
+{
+  "name": "Volleyball Tournament Manager",
+  "description": "A comprehensive and user-friendly web application for managing a volleyball tournament. This app handles team registration, dynamic scheduling based on user-defined constraints, real-time score tracking, and playoff bracket generation.",
+  "requestFramePermissions": []
+}
